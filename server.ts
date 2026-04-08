@@ -4,6 +4,7 @@ import { load } from "cheerio";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
+import { translate } from "@vitalets/google-translate-api";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,6 +14,22 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json());
+
+  // API Route to translate text
+  app.post("/api/translate", async (req, res) => {
+    try {
+      const { text, to } = req.body;
+      if (!text) {
+        return res.status(400).json({ error: "Text is required" });
+      }
+      
+      const result = await translate(text, { to: to || "ko" });
+      res.json({ text: result.text });
+    } catch (error: any) {
+      console.error("Translation error:", error.message);
+      res.status(500).json({ error: "Translation failed", details: error.message });
+    }
+  });
 
   // API Route to scrape Telegram
   app.get("/api/scrape", async (req, res) => {
