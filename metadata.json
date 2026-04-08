@@ -1,0 +1,5 @@
+{
+  "name": "Trump Telegram Monitor & Translator",
+  "description": "Monitors Donald Trump's Telegram channel, detects new posts, and translates them into Korean using Gemini AI.",
+  "requestFramePermissions": []
+}
