@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { fetchTelegramPosts } from "./services/telegramService";
-import { translateToKorean } from "./services/geminiService";
+import { translateToKorean } from "./services/translationService";
 import { Post, Settings } from "./types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,7 +15,8 @@ import {
   CheckCircle2,
   AlertCircle,
   Timer,
-  User as UserIcon
+  User as UserIcon,
+  RotateCcw
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -70,64 +71,137 @@ export default function App() {
     toast.success(`체크 주기가 ${interval}분으로 변경되었습니다.`);
   };
 
+  const isCheckingRef = useRef(false);
+
+  const retryTranslation = async (postId: string, originalText: string) => {
+    try {
+      toast.loading("재번역 중...", { id: `retry-${postId}` });
+      const translated = await translateToKorean(originalText);
+      
+      setPosts(prev => {
+        const updated = prev.map(p => 
+          p.id === postId ? { ...p, translatedText: translated } : p
+        );
+        localStorage.setItem(STORAGE_KEYS.POSTS, JSON.stringify(updated));
+        return updated;
+      });
+      
+      toast.success("번역이 완료되었습니다.", { id: `retry-${postId}` });
+    } catch (err) {
+      console.error(`Manual retry failed for post ${postId}:`, err);
+      toast.error("번역에 실패했습니다. 잠시 후 다시 시도해주세요.", { id: `retry-${postId}` });
+    }
+  };
+
   const checkNewPosts = useCallback(async () => {
-    if (isChecking || !settings) return;
+    if (isCheckingRef.current || !settings) return;
     
+    isCheckingRef.current = true;
     setIsChecking(true);
     setError(null);
     try {
       const telegramPosts = await fetchTelegramPosts();
+      
+      if (!telegramPosts || !Array.isArray(telegramPosts)) {
+        throw new Error("Invalid response from Telegram scraper");
+      }
+
       const lastIdRaw = settings.lastProcessedId || "";
       const lastId = lastIdRaw.includes('/') ? lastIdRaw.split('/').pop() || "" : lastIdRaw;
       
       const newPostsRaw = telegramPosts.filter(p => !lastId || parseInt(p.id) > parseInt(lastId)).reverse();
 
-      if (newPostsRaw.length > 0) {
-        toast.success(`${newPostsRaw.length}개의 새로운 포스트를 발견했습니다! 번역 중...`);
+      // Collect all posts that need translation (new ones + existing ones with error)
+      const postsToTranslate: { id: string, text: string, isNew: boolean }[] = [];
+      
+      // Add new posts
+      newPostsRaw.forEach(p => postsToTranslate.push({ id: p.id, text: p.text, isNew: true }));
+      
+      // Add existing posts that failed translation
+      posts.forEach(p => {
+        if (p.translatedText === "번역 실패" || p.translatedText === "번역 중 오류가 발생했습니다.") {
+          postsToTranslate.push({ id: p.id, text: p.originalText, isNew: false });
+        }
+      });
+
+      if (postsToTranslate.length > 0) {
+        toast.info(`${postsToTranslate.length}개의 포스트 번역을 시도합니다...`);
         
-        const processedPosts: Post[] = [];
+        const translatedResults: Record<string, string> = {};
         let latestId = lastId;
 
-        for (const p of newPostsRaw) {
-          const translated = await translateToKorean(p.text);
-          const newPost: Post = {
-            id: p.id,
-            originalText: p.text,
-            translatedText: translated,
-            timestamp: Date.now()
-          };
-          processedPosts.push(newPost);
-          latestId = p.id;
+        for (const p of postsToTranslate) {
+          try {
+            const translated = await translateToKorean(p.text);
+            translatedResults[p.id] = translated;
+            if (p.isNew) latestId = p.id;
+          } catch (err) {
+            console.error(`Translation failed for post ${p.id}:`, err);
+            translatedResults[p.id] = "번역 실패"; // Will retry next time
+          }
         }
 
         // Update state and LocalStorage
-        const updatedPosts = [...processedPosts, ...posts].slice(0, 100); // Keep last 100
-        setPosts(updatedPosts);
-        localStorage.setItem(STORAGE_KEYS.POSTS, JSON.stringify(updatedPosts));
+        setPosts(prev => {
+          let updated = [...prev];
+          
+          // Update existing ones or add new ones
+          postsToTranslate.forEach(p => {
+            const existingIndex = updated.findIndex(up => up.id === p.id);
+            if (existingIndex !== -1) {
+              updated[existingIndex] = {
+                ...updated[existingIndex],
+                translatedText: translatedResults[p.id] || updated[existingIndex].translatedText
+              };
+            } else if (p.isNew) {
+              const newPost: Post = {
+                id: p.id,
+                originalText: p.text,
+                translatedText: translatedResults[p.id] || "번역 실패",
+                timestamp: Date.now()
+              };
+              updated = [newPost, ...updated];
+            }
+          });
 
-        const updatedSettings = { ...settings, lastProcessedId: latestId };
-        setSettings(updatedSettings);
-        localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(updatedSettings));
+          const finalPosts = updated.slice(0, 100);
+          localStorage.setItem(STORAGE_KEYS.POSTS, JSON.stringify(finalPosts));
+          return finalPosts;
+        });
 
-        toast.success("모든 포스트 번역 완료!");
+        if (latestId !== lastId) {
+          setSettings(prev => {
+            if (!prev) return prev;
+            const updatedSettings = { ...prev, lastProcessedId: latestId };
+            localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(updatedSettings));
+            return updatedSettings;
+          });
+        }
+
+        toast.success("번역 작업 완료!");
       }
       
       setLastCheckTime(new Date());
 
       // Cleanup: Delete posts older than 7 days
       const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-      const filteredPosts = posts.filter(p => p.timestamp >= sevenDaysAgo);
-      if (filteredPosts.length !== posts.length) {
-        setPosts(filteredPosts);
-        localStorage.setItem(STORAGE_KEYS.POSTS, JSON.stringify(filteredPosts));
-      }
+      setPosts(prev => {
+        const filteredPosts = prev.filter(p => p.timestamp >= sevenDaysAgo);
+        if (filteredPosts.length !== prev.length) {
+          localStorage.setItem(STORAGE_KEYS.POSTS, JSON.stringify(filteredPosts));
+          return filteredPosts;
+        }
+        return prev;
+      });
     } catch (err) {
       console.error("Error checking posts:", err);
-      setError("포스트를 확인하는 중 오류가 발생했습니다.");
+      const message = err instanceof Error ? err.message : String(err);
+      setError(`포스트를 확인하는 중 오류가 발생했습니다: ${message}`);
     } finally {
+      isCheckingRef.current = false;
       setIsChecking(false);
     }
-  }, [isChecking, settings, posts]);
+  }, [settings]);
 
   // Periodic check
   useEffect(() => {
@@ -311,9 +385,25 @@ export default function App() {
                               <p className="text-sm font-medium leading-relaxed text-slate-900">
                                 {post.translatedText}
                               </p>
+                              {post.translatedText === "번역 실패" && (
+                                <div className="flex items-center justify-between">
+                                  <p className="text-[10px] text-amber-600 flex items-center gap-1">
+                                    <AlertCircle className="w-3 h-3" /> 다음 확인 시 재번역을 시도합니다.
+                                  </p>
+                                  <Button 
+                                    variant="ghost" 
+                                    size="sm" 
+                                    onClick={() => retryTranslation(post.id, post.originalText)}
+                                    className="h-7 px-2 text-[10px] text-blue-600 hover:text-blue-700 hover:bg-blue-50"
+                                  >
+                                    <RotateCcw className="w-3 h-3 mr-1" /> 즉시 재번역
+                                  </Button>
+                                </div>
+                              )}
                             </div>
-                            <div className="pt-4 border-t border-slate-50">
-                              <p className="text-[10px] text-slate-400 font-mono line-clamp-2 italic">
+                            <div className="pt-4 border-t border-slate-50 space-y-2">
+                              <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Original Text</p>
+                              <p className="text-[10px] text-slate-500 font-mono leading-relaxed bg-slate-50/50 p-2 rounded border border-slate-100/50">
                                 {post.originalText}
                               </p>
                             </div>

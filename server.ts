@@ -1,6 +1,6 @@
 import express from "express";
 import axios from "axios";
-import * as cheerio from "cheerio";
+import { load } from "cheerio";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
@@ -19,19 +19,26 @@ async function startServer() {
     try {
       const channel = "realDonaldTrump_en";
       const url = `https://t.me/s/${channel}`;
-      const { data: html } = await axios.get(url, {
+      
+      console.log(`Scraping Telegram channel: ${channel}`);
+      
+      const response = await axios.get(url, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        timeout: 10000, // 10 seconds timeout
       });
-      const $ = cheerio.load(html);
+
+      const html = response.data;
+      const $ = load(html);
       const posts: any[] = [];
 
       $('.tgme_widget_message_wrap').each((i, el) => {
         const $el = $(el);
         const fullId = $el.find('.tgme_widget_message').attr('data-post');
         const id = fullId ? fullId.split('/').pop() : null;
-        const text = $el.find('.tgme_widget_message_text').html(); 
         const plainText = $el.find('.tgme_widget_message_text').text().trim();
         const date = $el.find('.time').attr('datetime');
         
@@ -40,11 +47,17 @@ async function startServer() {
         }
       });
 
-      // Telegram preview usually shows last 20 posts.
+      console.log(`Found ${posts.length} posts`);
       res.json({ posts: posts.reverse() }); // Newest first
-    } catch (error) {
-      console.error("Scraping error:", error);
-      res.status(500).json({ error: "Failed to scrape Telegram" });
+    } catch (error: any) {
+      console.error("Scraping error:", error.message);
+      if (error.response) {
+        console.error("Response status:", error.response.status);
+      }
+      res.status(500).json({ 
+        error: "Failed to scrape Telegram", 
+        details: error.message 
+      });
     }
   });
 
